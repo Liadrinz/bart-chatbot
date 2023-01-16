@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Chatbot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css">
+  <style>
+    [v-cloak] {
+      display: none;
+    }
+    
+    body {
+      background: rgb(237, 237, 237);
+    }
+
+    .input-box {
+      display: flex;
+      position: fixed;
+      bottom: 0;
+      padding-top: 1rem;
+      padding-bottom: 1rem;
+      left: 0;
+      width: 100%;
+      background-color: rgb(246, 246, 246);
+      z-index: 2000;
+    }
+    
+    .el-button--text {
+      color: #222;
+    }
+
+    .header {
+      display: flex;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      padding-left: 1rem;
+      padding-right: 1rem;
+      background-color: rgb(246, 246, 246);
+      z-index: 2000;
+    }
+
+    .input-box-item {
+      margin: 0 .5rem;
+    }
+    
+    .msg-box {
+      width: fit-content;
+      margin: .5rem 0;
+    }
+
+    .msg-box-bot {
+      background-color: rgb(255, 255, 255);
+    }
+
+    .msg-box-user {
+      background-color: rgb(149, 236, 105);
+    }
+
+    .el-popover {
+      display: flex;
+      justify-content: space-evenly;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app" v-cloak>
+    <el-dialog title="设置" :visible.sync="configVisible" :fullscreen="true">
+      <el-form label-width="100px">
+        <el-form-item label="上下文长度">
+          <el-input-number v-model="settings.contextLength" :min="1" :max="32" @change="saveConfig"></el-input-number>
+        </el-form-item>
+        <el-form-item label="解码算法">
+          <el-select v-model="settings.decodeMethod" @change="saveConfig">
+            <el-option key="beam_search" label="beam_search" value="beam_search"></el-option>
+            <el-option key="topp" label="topp" value="top_p"></el-option>
+            <el-option key="topk" label="topk" value="top_k"></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="settings.decodeMethod === 'beam_search'" label="num_beams">
+          <el-input-number v-model="settings.numBeams" :min="1" :max="4" @change="saveConfig"></el-input-number>
+        </el-form-item>
+        <el-form-item v-if="settings.decodeMethod === 'top_p'" label="topp">
+          <el-input-number v-model="settings.topp" :precision="2" :step="0.01" :min="0" :max="1" @change="saveConfig"></el-input-number>
+        </el-form-item>
+        <el-form-item v-if="settings.decodeMethod === 'top_k'" label="topk">
+          <el-input-number v-model="settings.topk" :min="1" :max="100" @change="saveConfig"></el-input-number>
+        </el-form-item>
+        <el-button type="danger" @click="clearHistory">清除历史记录</el-button>
+      </el-form>
+    </el-dialog>
+    <div class="chat-window">
+      <div class="header">
+        <el-button @click="showConfig" type="text" style="font-size: 25px"><i class="el-icon-setting"></i></el-button>
+      </div>
+      <div class="input-box">
+        <el-input class="input-box-item" v-model="currentMsg" @keyup.enter.native="send" placeholder="请输入消息..." @select="scrollBottom"></el-input>
+        <el-button class="input-box-item" type="success" @click="send" :disabled="sendDisabled">发送</el-button>
+      </div>
+      <div class="msg-window">
+        <div style="height: 300px"></div>
+        <el-popover v-for="msg, msgIdx in msgs" placement="top-end" trigger="hover" :disabled="msg.speaker === 'user' || msgIdx === 0 || msg.editing || msg.locked">
+          <el-button type="text" @click="edit(msgIdx)" v-show="!msg.editing" style="display: inline-block; font-size: 25px">
+            <i class="el-icon-edit"></i>
+          </el-button>
+          <el-button type="text" @click="feedback(msgIdx, 1)" style="display: inline-block; font-size: 25px">
+            👍
+          </el-button>
+          <el-button type="text" @click="feedback(msgIdx, 0)" style="display: inline-block; font-size: 25px">
+            😐
+          </el-button>
+          <el-button type="text" @click="feedback(msgIdx, -1)" style="display: inline-block; font-size: 25px">
+            👎
+          </el-button>
+          <div style="width: fit-content; display: flex; justify-content: center; align-items: center" slot="reference">
+            <el-image v-show="msg.speaker === 'bot'" style="height: 45px; width: 45px; margin-right: .5rem;" fit="scale-down" src="/static/bart-mini.png"></el-image>
+            <el-image v-show="msg.speaker === 'user'" style="height: 45px; width: 45px; margin-right: .5rem;" fit="scale-down" src="/static/icebear-mini.png"></el-image>
+            <el-card :id="`msg-${msgIdx}`" :class="`msg-box msg-box-${msg.speaker}`" style="display: inline-block">
+              <span v-show="!msg.editing">{[msg.msg]}</span>
+              <span v-show="msg.editing" style="display: inline-block"><el-input v-model="msg.msg"></el-input></span>
+              <span v-show="msg.speaker === 'bot' && msgIdx > 0" style="display: inline-block">
+                <el-button type="text" @click="correct(msgIdx)" v-show="msg.editing" style="display: inline-block"><i class="el-icon-check"></i></el-button>
+                <el-button type="text" @click="cancel(msgIdx)" v-show="msg.editing" style="display: inline-block"><i class="el-icon-close"></i></el-button>
+              </span>
+            </el-card>
+            <div style="padding-left: 1rem; font-size: 20px">{[["👎", "", "👍"][msg.polarity + 1]]}</div>
+          </div>
+        </el-popover>
+        <div id="pivot" style="height: 75px"></div>
+      </div>
+    </div>
+  </div>
+</body>
+<script src="https://unpkg.com/vue@2/dist/vue.js"></script>
+<script src="https://unpkg.com/element-ui/lib/index.js"></script>
+<script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+<script>
+  var app = new Vue({
+    el: "#app",
+    delimiters: ["{[", "]}"],
+    data() {
+      return {
+        loading: false,
+        sendDisabled: false,
+        currentMsg: "",
+        configVisible: false,
+        settings:{
+          contextLength: 5,
+          numBeams: 1,
+          topp: 0.5,
+          topk: 10,
+          decodeMethod: "top_p",
+        },
+        msgs: [
+          { msg: "你好，我是BART，欢迎跟我聊天！", speaker: "bot", polarity: 0 },
+        ]
+      }
+    },
+    mounted() {
+      this.loadConfig()
+    },
+    methods: {
+      saveConfig() {
+        localStorage.setItem("settings", JSON.stringify(this.settings))
+      },
+      loadConfig() {
+        let cachedSettings = localStorage.getItem("settings")
+        if (cachedSettings != null) {
+          Object.assign(this.settings, JSON.parse(cachedSettings))
+        }
+      },
+      send() {
+        /*let violations = ac.search(this.currentMsg)
+        if (violations.length > 0) {
+          for (let v of violations) {
+            let [idx, values] = v
+            let length = Math.max(...values.map(val => val.length))
+            this.currentMsg = this.currentMsg.substr(0, idx-length+1) + "*".repeat(length) + this.currentMsg.substr(idx+1)
+          }
+        }*/
+        this.sendDisabled = true
+        this.msgs.push({ msg: this.currentMsg, speaker: "user" })
+        this.$nextTick(() => {
+          this.scrollBottom()
+        })
+        this.currentMsg = ""
+        axios.post("/chat", {
+          msgs: this.msgs.slice(Math.max(1, this.msgs.length - this.settings.contextLength), this.msgs.length),
+          decodeMethod: this.settings.decodeMethod,
+          numBeams: this.settings.numBeams,
+          topp: this.settings.topp,
+          topk: this.settings.topk,
+        }).then((data) => {
+            this.msgs.push({ msg: data.data.msg, speaker: "bot", polarity: 0 })
+            this.sendDisabled = false
+            this.$nextTick(() => {
+              this.scrollBottom()
+            })
+          })
+          .catch((err) => {
+            this.$message.error(err)
+            this.sendDisabled = false
+            this.currentMsg = this.msgs.pop().msg
+          })
+      },
+      edit(msgIdx) {
+        this.$set(this.msgs[msgIdx], "editing", true)
+        this.$set(this.msgs[msgIdx], "rn", this.msgs[msgIdx]["msg"])
+      },
+      correct(msgIdx) {
+        this.$message({
+          type: "success",
+          message: "感谢反馈",
+        })
+        this.$set(this.msgs[msgIdx], "editing", false)
+        this.$set(this.msgs[msgIdx], "locked", true)
+        axios.post("/correct", { msgs: this.msgs.slice(Math.max(1, this.msgs.length - this.settings.contextLength), msgIdx), rn: this.msgs[msgIdx].rn, rp: this.msgs[msgIdx].msg })
+          .then((data) => {
+            this.$set(this.msgs[msgIdx], "locked", false)
+          })
+          .catch((err) => {
+            this.$message.error(err)
+            this.$set(this.msgs[msgIdx], "msg", this.msgs[msgIdx]["rn"])
+            this.$set(this.msgs[msgIdx], "locked", false)
+          })
+      },
+      cancel(msgIdx) {
+        this.$set(this.msgs[msgIdx], "editing", false)
+        this.$set(this.msgs[msgIdx], "msg", this.msgs[msgIdx]["rn"])
+      },
+      feedback(msgIdx, pol) {
+        let msg = this.msgs[msgIdx]
+        prevPol = msg.polarity
+        if (prevPol === pol) {
+          return
+        }
+        this.$message({
+          type: "success",
+          message: "感谢反馈",
+        })
+        this.$set(this.msgs[msgIdx], "prevPol", prevPol)
+        this.$set(this.msgs[msgIdx], "polarity", pol)
+        this.$set(this.msgs[msgIdx], "locked", true)
+        axios.post("/feedback", { msgs: this.msgs.slice(Math.max(1, this.msgs.length - this.settings.contextLength), msgIdx), r: this.msgs[msgIdx].msg, p: pol - prevPol })
+          .then((data) => {
+            this.$set(this.msgs[msgIdx], "polarity", pol)
+            this.$set(this.msgs[msgIdx], "locked", false)
+          })
+          .catch((err) => {
+            this.$message.error(err)
+            this.$set(this.msgs[msgIdx], "polarity", this.msgs[msgIdx]["prevPol"])
+            this.$set(this.msgs[msgIdx], "locked", false)
+          })
+      },
+      showConfig() {
+        this.configVisible = true
+      },
+      scrollBottom() {
+        document.getElementById("pivot").scrollIntoView(true)
+      },
+      clearHistory() {
+        while (this.msgs.length > 1) {
+          this.msgs.pop()
+        }
+        this.configVisible = false
+      }
+    }
+  })
+</script>
+
+</html>
